@@ -197,7 +197,7 @@ def sync_to_board(question_data: dict):
 
         headers = ws_board.row_values(1)
         fields  = ["question","answer","criticality","impact","release",
-                   "block","status","created_date","resolved_date"]
+          "block","status","created_date","resolved_date","chat_name"]
 
         if matched_idx:
             for col_name in fields:
