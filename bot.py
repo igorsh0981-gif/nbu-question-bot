@@ -123,22 +123,26 @@ def ai_analyze(text: str, asked_by: str, reply_to: str = "") -> dict:
         return {"is_question": False}
 
 def ai_verify(question: str, answer: str) -> dict:
+    # Ключевые слова закрытия — без Claude
+    close_keywords = ["закрыт", "готово", "сделано", "выполнено", "ответ дан",
+                      "ответ предоставлен", "предоставлен", "предоставили",
+                      "ok", "ок", "принято", "согласовано", "исправлено", "решено", "дан"]
+    answer_lower = answer.lower().strip()
+    for kw in close_keywords:
+        if kw in answer_lower:
+            log.info(f"Keyword match: '{kw}' — closing")
+            return {"isAnswer": True, "confidence": 0.9, "summary": answer[:80]}
+
     try:
         resp = ai_client.messages.create(
             model="claude-haiku-4-5-20251001", max_tokens=150,
-            messages=[{"role":"user","content":f"Является ли сообщение ответом на вопрос?\nВопрос: {question}\nСообщение: {answer}\nВерни ТОЛЬКО JSON: {{\"isAnswer\": true/false, \"confidence\": 0.0-1.0, \"summary\": \"резюме\"}}"}]
+            messages=[{"role":"user","content":f"Контекст: трекер вопросов банковского проекта.\nВопрос: {question}\nReply: {answer}\nЯвляется ли reply ответом или подтверждением закрытия?\nВерни ТОЛЬКО JSON: {{\"isAnswer\": true/false, \"confidence\": 0.0-1.0, \"summary\": \"резюме\"}}"}]
         )
         raw = re.sub(r"```json|```","", resp.content[0].text).strip()
         return json.loads(raw)
     except Exception as e:
         log.error(f"Claude verify error: {e}")
         return {"isAnswer": False, "confidence": 0, "summary": ""}
-
-async def notify_pm(text: str):
-    try:
-        await bot.send_message(PM_CHAT_ID, text)
-    except Exception as e:
-        log.error(f"PM notify error: {e}")
 
 # ── Основной хендлер ─────────────────────────────────────────────
 @dp.message(F.text)
