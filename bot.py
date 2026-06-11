@@ -114,18 +114,18 @@ def find_board_match(new_question: str, board_rows: list) -> tuple:
     clean_new = clean_for_compare(new_question)
 
     # Берём 60 символов начиная с позиции 10 (пропускаем возможный мусор в начале)
-    if len(clean_new) > 70:
-        chunk = clean_new[10:70]
-    elif len(clean_new) > 20:
-        chunk = clean_new[10:] if len(clean_new) > 30 else clean_new
+    if len(clean_new) > 40:
+        chunk = clean_new[5:35]
+    elif len(clean_new) > 15:
+        chunk = clean_new
     else:
         chunk = clean_new
 
-    # Шаг 1: текстовое совпадение по подстроке
-    if len(chunk) >= 20:
+    # Шаг 1: текстовое совпадение по подстроке 30 символов
+    if len(chunk) >= 15:
         for i, r in enumerate(board_rows):
             clean_board = clean_for_compare(r.get("question",""))
-            if chunk in clean_board or clean_board and chunk[:40] in clean_board:
+            if chunk in clean_board or (len(chunk) >= 20 and chunk[:25] in clean_board):
                 row_num = i + 2
                 log.info(f"Board match by substring at row {row_num}")
                 return row_num, r.get("status","")
@@ -251,9 +251,10 @@ def ai_analyze(text: str, asked_by: str, reply_to: str = "") -> dict:
         return {"is_question": False}
 
 def ai_verify(question: str, answer: str) -> dict:
-    close_kw = ["закрыт","готово","сделано","выполнено","ответ дан",
-                "предоставлен","предоставили","ok","ок","принято",
-                "исправлено","решено","дан","выполнили","сделали"]
+    close_kw = ["закрыт","закрываем","закрыто","готово","сделано","выполнено",
+                "ответ дан","ответ предоставлен","ответ","предоставлен","предоставили",
+                "ok","ок","принято","согласовано","исправлено","решено","дан",
+                "выполнили","сделали","смотри","см.","направили","отправили"]
     al = answer.lower().strip()
     for kw in close_kw:
         if kw in al:
