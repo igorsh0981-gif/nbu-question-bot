@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════
-# NBU Question Bot — тихий режим v3
+# NBU Question Bot — тихий режим v5
 # ═══════════════════════════════════════════════════════════════
 
 import asyncio
@@ -52,6 +52,7 @@ ws       = sh.worksheet(SHEET_NAME)
 sh_board = gc.open_by_key(BOARD_SHEET_ID)
 ws_board = sh_board.worksheet("questions_bank")
 
+# ── Google Sheets хелперы ─────────────────────────────────────────
 def get_all_rows() -> list:
     return ws.get_all_records()
 
@@ -97,6 +98,133 @@ def check_duplicate(question_text: str) -> Optional[dict]:
             return r
     return None
 
+# ── Очистка текста для сравнения ─────────────────────────────────
+def clean_for_compare(text: str) -> str:
+    text = re.sub(r'@\w+', '', text)           # убираем @mentions
+    text = re.sub(r'^вопрос\s*:?\s*', '', text, flags=re.I)  # убираем слово "вопрос"
+    text = re.sub(r'\s+', ' ', text)           # нормализуем пробелы
+    return text.strip().lower()
+
+def find_board_match(new_question: str, board_rows: list) -> tuple:
+    """
+    Ищет совпадение в борде.
+    Возвращает (row_number, board_status) или (None, None).
+    Сначала по подстроке 60 символов, потом через Claude.
+    """
+    clean_new = clean_for_compare(new_question)
+
+    # Берём 60 символов начиная с позиции 10 (пропускаем возможный мусор в начале)
+    if len(clean_new) > 70:
+        chunk = clean_new[10:70]
+    elif len(clean_new) > 20:
+        chunk = clean_new[10:] if len(clean_new) > 30 else clean_new
+    else:
+        chunk = clean_new
+
+    # Шаг 1: текстовое совпадение по подстроке
+    if len(chunk) >= 20:
+        for i, r in enumerate(board_rows):
+            clean_board = clean_for_compare(r.get("question",""))
+            if chunk in clean_board or clean_board and chunk[:40] in clean_board:
+                row_num = i + 2
+                log.info(f"Board match by substring at row {row_num}")
+                return row_num, r.get("status","")
+
+    # Шаг 2: Claude как fallback
+    if board_rows:
+        candidates = [
+            {"row": i+2, "q": r.get("question","")[:100], "status": r.get("status","")}
+            for i, r in enumerate(board_rows)
+            if r.get("question","").strip()
+        ]
+        if candidates:
+            clist = "\n".join(f'{c["row"]}. {c["q"]}' for c in candidates[:30])
+            prompt = (
+                "Найди строку наиболее похожую по смыслу (90%+) на новый вопрос.\n"
+                "Игнорируй @mentions и слово 'Вопрос' в начале.\n\n"
+                f"Новый вопрос: {new_question[:200]}\n\n"
+                f"Существующие:\n{clist}\n\n"
+                "Если совпадение >= 90% — верни ТОЛЬКО номер строки (целое число).\n"
+                "Если нет — верни 0."
+            )
+            try:
+                resp = ai_client.messages.create(
+                    model="claude-haiku-4-5-20251001", max_tokens=10,
+                    messages=[{"role":"user","content":prompt}]
+                )
+                txt = resp.content[0].text.strip()
+                first = txt.split()[0] if txt.split() else "0"
+                digits = "".join(c for c in first if c.isdigit())
+                row_num = int(digits) if digits else 0
+                if row_num >= 2:
+                    matched_cand = next((c for c in candidates if c["row"] == row_num), None)
+                    status = matched_cand["status"] if matched_cand else ""
+                    log.info(f"Board match by Claude at row {row_num}")
+                    return row_num, status
+            except Exception as e:
+                log.error(f"Board Claude dedup error: {e}")
+
+    return None, None
+
+# ── Синхронизация с questions_bank ───────────────────────────────
+def sync_to_board(question_data: dict):
+    """
+    Правила:
+    - Борд ОТКРЫТА + бот ОТКРЫТА  → обновить
+    - Борд ОТКРЫТА + бот ЗАКРЫТА  → обновить (закрыть)
+    - Борд ЗАКРЫТА + бот ОТКРЫТА  → создать новую
+    - Борд ЗАКРЫТА + бот ЗАКРЫТА  → игнорировать
+    - Не найден                   → создать новую
+    """
+    try:
+        board_rows = ws_board.get_all_records()
+        q_text = question_data.get("question", "")
+        incoming_status = question_data.get("status", "ОТКРЫТА")
+
+        matched_idx, board_status = find_board_match(q_text, board_rows)
+
+        # Применяем правила статусов
+        if matched_idx:
+            board_closed = board_status == "ЗАКРЫТА"
+            bot_closed   = incoming_status == "ЗАКРЫТА"
+
+            if board_closed and not bot_closed:
+                log.info("Board ЗАКРЫТА + bot ОТКРЫТА → create new")
+                matched_idx = None
+            elif board_closed and bot_closed:
+                log.info("Both ЗАКРЫТА → skip")
+                return
+
+        headers = ws_board.row_values(1)
+        fields  = ["question","answer","criticality","impact","release",
+                   "block","status","created_date","resolved_date"]
+
+        if matched_idx:
+            for col_name in fields:
+                if col_name in headers and col_name in question_data:
+                    col_idx = headers.index(col_name) + 1
+                    ws_board.update_cell(matched_idx, col_idx, str(question_data.get(col_name,"")))
+            log.info(f"Board row {matched_idx} updated → status={incoming_status}")
+        else:
+            # БАГ 3 FIX: всегда генерируем новый int ID для борда
+            max_id = max(
+                (int(r.get("id",0)) for r in board_rows if str(r.get("id","")).isdigit()),
+                default=0
+            )
+            new_id = max_id + 1
+            row = []
+            for h in headers:
+                if h == "id":
+                    row.append(str(new_id))  # int ID для борда
+                else:
+                    row.append(str(question_data.get(h,"")))
+            ws_board.append_row(row, value_input_option="USER_ENTERED")
+            log.info(f"Board new row id={new_id}")
+
+    except Exception as e:
+        log.error(f"sync_to_board error: {e}")
+
+# ── Claude ────────────────────────────────────────────────────────
 def ai_analyze(text: str, asked_by: str, reply_to: str = "") -> dict:
     prompt = (
         "Ты анализатор сообщений Telegram-чата банковского проекта НБУ Узбекистана (Milliy 3.0).\n\n"
@@ -148,98 +276,13 @@ def ai_verify(question: str, answer: str) -> dict:
         log.error(f"Claude verify error: {e}")
         return {"isAnswer": False, "confidence": 0, "summary": ""}
 
-def sync_to_board(question_data: dict):
-    """
-    Правила синхронизации с questions_bank:
-    - Найден дубль ОТКРЫТА + бот пишет ОТКРЫТА  → обновляем
-    - Найден дубль ЗАКРЫТА + бот пишет ОТКРЫТА  → создаём новую (не трогаем закрытую)
-    - Найден дубль ОТКРЫТА + бот пишет ЗАКРЫТА  → обновляем (закрываем)
-    - Найден дубль ЗАКРЫТА + бот пишет ЗАКРЫТА  → игнорируем
-    - Дубль не найден                            → создаём новую
-    """
-    try:
-        board_rows = ws_board.get_all_records()
-        q_text = question_data.get("question", "")
-        incoming_status = question_data.get("status", "ОТКРЫТА")
-        matched_idx = None
-        matched_board_status = None
-
-        if board_rows and q_text:
-            candidates = [
-                {"row": i+2, "q": r.get("question","")[:100], "status": r.get("status","")}
-                for i, r in enumerate(board_rows)
-                if r.get("question","").strip()
-            ]
-            if candidates:
-                clist = "\n".join(f'{c["row"]}. {c["q"]}' for c in candidates[:30])
-                prompt = (
-                    "Найди строку наиболее похожую по смыслу (90%+) на новый вопрос.\n\n"
-                    f"Новый вопрос: {q_text[:200]}\n\n"
-                    f"Существующие:\n{clist}\n\n"
-                    "Если совпадение >= 90% — верни ТОЛЬКО номер строки (целое число).\n"
-                    "Если нет — верни 0."
-                )
-                try:
-                    resp = ai_client.messages.create(
-                        model="claude-haiku-4-5-20251001", max_tokens=10,
-                        messages=[{"role":"user","content":prompt}]
-                    )
-                    txt = resp.content[0].text.strip()
-                    first = txt.split()[0] if txt.split() else "0"
-                    digits = "".join(c for c in first if c.isdigit())
-                    row_num = int(digits) if digits else 0
-                    if row_num >= 2:
-                        matched_idx = row_num
-                        matched_board_status = candidates[row_num-2].get("status","") if row_num-2 < len(candidates) else ""
-                        log.info(f"Board dup at row {row_num} status={matched_board_status}")
-                except Exception as e:
-                    log.error(f"Board dedup error: {e}")
-
-        # Применяем правила
-        if matched_idx:
-            board_is_closed = matched_board_status == "ЗАКРЫТА"
-            bot_is_closed   = incoming_status == "ЗАКРЫТА"
-
-            if board_is_closed and not bot_is_closed:
-                # Борд закрыт, бот открытый → создаём новую запись
-                log.info("Board closed + bot open → create new row")
-                matched_idx = None  # сбрасываем чтобы пойти в ветку создания
-            elif board_is_closed and bot_is_closed:
-                # Оба закрыты → игнорируем
-                log.info("Both closed → skip")
-                return
-            # иначе обновляем (board open + bot open/closed)
-
-        headers = ws_board.row_values(1)
-        fields = ["question","answer","criticality","impact","release",
-                  "block","status","created_date","resolved_date"]
-
-        if matched_idx:
-            for col_name in fields:
-                if col_name in headers and col_name in question_data:
-                    col_idx = headers.index(col_name) + 1
-                    ws_board.update_cell(matched_idx, col_idx, str(question_data.get(col_name,"")))
-            log.info(f"Board row {matched_idx} updated")
-        else:
-            max_id = max(
-                (int(r.get("id",0)) for r in board_rows if str(r.get("id","")).isdigit()),
-                default=0
-            )
-            new_id = max_id + 1
-            row = [str(new_id) if h == "id" else str(question_data.get(h,"")) for h in headers]
-            ws_board.append_row(row, value_input_option="USER_ENTERED")
-            log.info(f"Board new row id={new_id}")
-
-    except Exception as e:
-        log.error(f"sync_to_board error: {e}")
-
-
 async def notify_pm(text: str):
     try:
         await bot.send_message(PM_CHAT_ID, text)
     except Exception as e:
         log.error(f"PM notify error: {e}")
 
+# ── Основной хендлер ─────────────────────────────────────────────
 @dp.message(F.text)
 async def handle_message(msg: Message):
     text      = msg.text.strip()
@@ -251,7 +294,7 @@ async def handle_message(msg: Message):
     has_reply = bool(msg.reply_to_message)
     reply_mid = str(msg.reply_to_message.message_id) if has_reply else "none"
     reply_txt = (msg.reply_to_message.text or "")[:40] if has_reply else ""
-    log.info(f"IN from={asked_by} reply={has_reply} reply_mid={reply_mid} reply_txt='{reply_txt}' text='{text[:50]}'")
+    log.info(f"IN from={asked_by} reply={has_reply} reply_mid={reply_mid} text='{text[:50]}'")
 
     if text.startswith("/"):
         await handle_command(msg, text, chat_id, asked_by)
@@ -278,10 +321,10 @@ async def handle_message(msg: Message):
             verdict = ai_verify(matched.get("question",""), text)
             log.info(f"Verdict: isAnswer={verdict.get('isAnswer')} confidence={verdict.get('confidence')}")
             if verdict.get("isAnswer") and verdict.get("confidence",0) >= 0.4:
-                update_row_by_id(matched["id"], {
-                    "answer": text, "status": "ЗАКРЫТА", "resolved_date": today_str()
-                })
-                sync_to_board({**matched, "answer": text, "status": "ЗАКРЫТА", "resolved_date": today_str()})
+                updates = {"answer": text, "status": "ЗАКРЫТА", "resolved_date": today_str()}
+                update_row_by_id(matched["id"], updates)
+                # БАГ 1 FIX: синхронизируем закрытие в борд
+                sync_to_board({**matched, **updates})
                 await notify_pm(
                     f"✅ Вопрос #{matched['id']} закрыт через reply\n"
                     f"💬 {verdict.get('summary') or text[:80]}\n"
@@ -289,7 +332,7 @@ async def handle_message(msg: Message):
                 )
                 return
             if not text.endswith("?") and not re.search(r"\bвопрос\b", text, re.I):
-                log.info("Reply not an answer and not a question — skipping")
+                log.info("Reply not answer, not question — skipping")
                 return
 
     reply_to_user, reply_to_name = "", ""
@@ -368,8 +411,9 @@ async def detect_answer(msg, text, chat_id, asked_by):
         return
     verdict = ai_verify(matched.get("question",""), text)
     if verdict.get("isAnswer") and verdict.get("confidence",0) >= 0.75:
-        update_row_by_id(matched["id"], {"answer":text,"status":"ЗАКРЫТА","resolved_date":today_str()})
-        sync_to_board({**matched, "answer": text, "status": "ЗАКРЫТА", "resolved_date": today_str()})
+        updates = {"answer":text,"status":"ЗАКРЫТА","resolved_date":today_str()}
+        update_row_by_id(matched["id"], updates)
+        sync_to_board({**matched, **updates})
         await notify_pm(f"✅ #{matched['id']} закрыт\n💬 {verdict.get('summary') or text[:80]}\nОтветил: {asked_by}")
 
 
@@ -432,6 +476,7 @@ async def handle_command(msg, text, chat_id, asked_by):
         await msg.reply("\n".join(lines))
         return
 
+# ── Планировщик ───────────────────────────────────────────────────
 async def daily_reminder():
     log.info("Daily reminder triggered")
     rows = get_all_rows()
@@ -490,8 +535,8 @@ async def main():
     scheduler.add_job(daily_reminder, CronTrigger(day_of_week="mon-fri", hour=10, minute=0))
     scheduler.add_job(weekly_report,  CronTrigger(day_of_week="mon",     hour=9,  minute=0))
     scheduler.start()
-    log.info("✅ NBU Bot v4 запущен")
-    await notify_pm("🤖 Бот v4 запущен — синхронизация с борд включена")
+    log.info("✅ NBU Bot v5 запущен")
+    await notify_pm("🤖 Бот v5 — фиксы дедупликации и синхронизации борда")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
