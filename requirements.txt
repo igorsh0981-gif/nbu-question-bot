@@ -1,0 +1,7 @@
+aiogram==3.7.0
+anthropic
+gspread
+google-auth
+google-auth-oauthlib
+requests
+apscheduler
