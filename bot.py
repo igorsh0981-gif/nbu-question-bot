@@ -22,7 +22,6 @@ from apscheduler.triggers.cron import CronTrigger
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-# ── Конфигурация ─────────────────────────────────────────────────
 TELEGRAM_TOKEN    = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_KEY     = os.environ["ANTHROPIC_API_KEY"]
 SHEET_ID          = os.environ["SHEET_ID"]
@@ -30,8 +29,8 @@ SHEET_NAME        = "Questions"
 GROUP_CHAT_ID     = int(os.environ.get("GROUP_CHAT_ID", "-1003963999739"))
 PM_CHAT_ID        = int(os.environ.get("PM_CHAT_ID", "5281759957"))
 GOOGLE_TOKEN_JSON = os.environ["GOOGLE_TOKEN_JSON"]
+BOARD_SHEET_ID    = os.environ.get("BOARD_SHEET_ID", "1zXNvio8ti1tpU4HkuROE9tzzPSQzLBCy_0gxvb7CYR0")
 
-# ── Инициализация ────────────────────────────────────────────────
 bot       = Bot(token=TELEGRAM_TOKEN)
 dp        = Dispatcher()
 ai_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -47,11 +46,12 @@ def make_gspread():
         c.refresh(Request())
     return gspread.authorize(c)
 
-gc = make_gspread()
-sh = gc.open_by_key(SHEET_ID)
-ws = sh.worksheet(SHEET_NAME)
+gc       = make_gspread()
+sh       = gc.open_by_key(SHEET_ID)
+ws       = sh.worksheet(SHEET_NAME)
+sh_board = gc.open_by_key(BOARD_SHEET_ID)
+ws_board = sh_board.worksheet("questions_bank")
 
-# ── Google Sheets хелперы ─────────────────────────────────────────
 def get_all_rows() -> list:
     return ws.get_all_records()
 
@@ -97,20 +97,20 @@ def check_duplicate(question_text: str) -> Optional[dict]:
             return r
     return None
 
-# ── Claude ────────────────────────────────────────────────────────
 def ai_analyze(text: str, asked_by: str, reply_to: str = "") -> dict:
-    prompt = f"""Ты анализатор сообщений Telegram-чата банковского проекта НБУ Узбекистана (Milliy 3.0).
-
-Сообщение: {text}
-Автор: {asked_by}
-{f"Reply на: {reply_to}" if reply_to else ""}
-
-Является ли это вопросом требующим ответа и отслеживания?
-Вопрос: прямой вопрос, запрос информации/статуса/доступа, проблема требующая решения.
-НЕ вопрос: приветствия, благодарности, утверждения, ответы на чужие вопросы.
-
-Верни ТОЛЬКО JSON без markdown:
-{{"is_question":true/false,"responsible":"@username если явно указан иначе null","block":"Авторизация|Платежи|Интеграция|Документы|Доступы|Тестирование|Дизайн|Другое","criticality":"RED|YELLOW|GREEN","impact":"одна фраза до 80 символов","release":"номер если упомянут иначе пустая строка","question_clean":"очищенный текст"}}"""
+    prompt = (
+        "Ты анализатор сообщений Telegram-чата банковского проекта НБУ Узбекистана (Milliy 3.0).\n\n"
+        f"Сообщение: {text}\nАвтор: {asked_by}\n"
+        + (f"Reply на: {reply_to}\n" if reply_to else "") +
+        "\nЯвляется ли это вопросом требующим ответа и отслеживания?\n"
+        "Вопрос: прямой вопрос, запрос информации/статуса/доступа, проблема требующая решения.\n"
+        "НЕ вопрос: приветствия, благодарности, утверждения, ответы на чужие вопросы.\n\n"
+        'Верни ТОЛЬКО JSON без markdown:\n'
+        '{"is_question":true/false,"responsible":"@username если явно указан иначе null",'
+        '"block":"Авторизация|Платежи|Интеграция|Документы|Доступы|Тестирование|Дизайн|Другое",'
+        '"criticality":"RED|YELLOW|GREEN","impact":"одна фраза до 80 символов",'
+        '"release":"номер если упомянут иначе пустая строка","question_clean":"очищенный текст"}'
+    )
     try:
         resp = ai_client.messages.create(
             model="claude-haiku-4-5-20251001", max_tokens=400,
@@ -132,7 +132,12 @@ def ai_verify(question: str, answer: str) -> dict:
             log.info(f"Keyword closing: {kw}")
             return {"isAnswer": True, "confidence": 0.9, "summary": answer[:80]}
     try:
-        prompt = f"Контекст: трекер вопросов.\nВопрос: {question}\nReply: {answer}\nЯвляется ли reply ответом? Верни JSON: {chr(123)}\"isAnswer\": true/false, \"confidence\": 0.0-1.0, \"summary\": \"резюме\"{chr(125)}"
+        prompt = (
+            "Контекст: трекер вопросов банковского проекта.\n"
+            f"Вопрос: {question}\nReply: {answer}\n"
+            "Является ли reply ответом или подтверждением закрытия?\n"
+            'Верни ТОЛЬКО JSON: {"isAnswer": true/false, "confidence": 0.0-1.0, "summary": "резюме"}'
+        )
         resp = ai_client.messages.create(
             model="claude-haiku-4-5-20251001", max_tokens=150,
             messages=[{"role":"user","content":prompt}]
@@ -143,51 +148,128 @@ def ai_verify(question: str, answer: str) -> dict:
         log.error(f"Claude verify error: {e}")
         return {"isAnswer": False, "confidence": 0, "summary": ""}
 
+def sync_to_board(question_data: dict):
+    """
+    Правила синхронизации с questions_bank:
+    - Найден дубль ОТКРЫТА + бот пишет ОТКРЫТА  → обновляем
+    - Найден дубль ЗАКРЫТА + бот пишет ОТКРЫТА  → создаём новую (не трогаем закрытую)
+    - Найден дубль ОТКРЫТА + бот пишет ЗАКРЫТА  → обновляем (закрываем)
+    - Найден дубль ЗАКРЫТА + бот пишет ЗАКРЫТА  → игнорируем
+    - Дубль не найден                            → создаём новую
+    """
+    try:
+        board_rows = ws_board.get_all_records()
+        q_text = question_data.get("question", "")
+        incoming_status = question_data.get("status", "ОТКРЫТА")
+        matched_idx = None
+        matched_board_status = None
+
+        if board_rows and q_text:
+            candidates = [
+                {"row": i+2, "q": r.get("question","")[:100], "status": r.get("status","")}
+                for i, r in enumerate(board_rows)
+                if r.get("question","").strip()
+            ]
+            if candidates:
+                clist = "\n".join(f'{c["row"]}. {c["q"]}' for c in candidates[:30])
+                prompt = (
+                    "Найди строку наиболее похожую по смыслу (90%+) на новый вопрос.\n\n"
+                    f"Новый вопрос: {q_text[:200]}\n\n"
+                    f"Существующие:\n{clist}\n\n"
+                    "Если совпадение >= 90% — верни ТОЛЬКО номер строки (целое число).\n"
+                    "Если нет — верни 0."
+                )
+                try:
+                    resp = ai_client.messages.create(
+                        model="claude-haiku-4-5-20251001", max_tokens=10,
+                        messages=[{"role":"user","content":prompt}]
+                    )
+                    txt = resp.content[0].text.strip()
+                    first = txt.split()[0] if txt.split() else "0"
+                    digits = "".join(c for c in first if c.isdigit())
+                    row_num = int(digits) if digits else 0
+                    if row_num >= 2:
+                        matched_idx = row_num
+                        matched_board_status = candidates[row_num-2].get("status","") if row_num-2 < len(candidates) else ""
+                        log.info(f"Board dup at row {row_num} status={matched_board_status}")
+                except Exception as e:
+                    log.error(f"Board dedup error: {e}")
+
+        # Применяем правила
+        if matched_idx:
+            board_is_closed = matched_board_status == "ЗАКРЫТА"
+            bot_is_closed   = incoming_status == "ЗАКРЫТА"
+
+            if board_is_closed and not bot_is_closed:
+                # Борд закрыт, бот открытый → создаём новую запись
+                log.info("Board closed + bot open → create new row")
+                matched_idx = None  # сбрасываем чтобы пойти в ветку создания
+            elif board_is_closed and bot_is_closed:
+                # Оба закрыты → игнорируем
+                log.info("Both closed → skip")
+                return
+            # иначе обновляем (board open + bot open/closed)
+
+        headers = ws_board.row_values(1)
+        fields = ["question","answer","criticality","impact","release",
+                  "block","status","created_date","resolved_date"]
+
+        if matched_idx:
+            for col_name in fields:
+                if col_name in headers and col_name in question_data:
+                    col_idx = headers.index(col_name) + 1
+                    ws_board.update_cell(matched_idx, col_idx, str(question_data.get(col_name,"")))
+            log.info(f"Board row {matched_idx} updated")
+        else:
+            max_id = max(
+                (int(r.get("id",0)) for r in board_rows if str(r.get("id","")).isdigit()),
+                default=0
+            )
+            new_id = max_id + 1
+            row = [str(new_id) if h == "id" else str(question_data.get(h,"")) for h in headers]
+            ws_board.append_row(row, value_input_option="USER_ENTERED")
+            log.info(f"Board new row id={new_id}")
+
+    except Exception as e:
+        log.error(f"sync_to_board error: {e}")
+
+
 async def notify_pm(text: str):
     try:
         await bot.send_message(PM_CHAT_ID, text)
     except Exception as e:
         log.error(f"PM notify error: {e}")
 
-# ── Основной хендлер ─────────────────────────────────────────────
 @dp.message(F.text)
 async def handle_message(msg: Message):
-    text     = msg.text.strip()
-    chat_id  = str(msg.chat.id)
+    text      = msg.text.strip()
+    chat_id   = str(msg.chat.id)
     from_user = msg.from_user
     username  = f"@{from_user.username}" if from_user.username else None
     asked_by  = " ".join(filter(None,[username, from_user.first_name])).strip()
 
-    # Лог каждого входящего
     has_reply = bool(msg.reply_to_message)
     reply_mid = str(msg.reply_to_message.message_id) if has_reply else "none"
     reply_txt = (msg.reply_to_message.text or "")[:40] if has_reply else ""
     log.info(f"IN from={asked_by} reply={has_reply} reply_mid={reply_mid} reply_txt='{reply_txt}' text='{text[:50]}'")
 
-    # Команды
     if text.startswith("/"):
         await handle_command(msg, text, chat_id, asked_by)
         return
 
-    # Reply — три способа найти вопрос
     if msg.reply_to_message:
         rows = get_all_rows()
         open_rows = [r for r in rows if r.get("status") == "ОТКРЫТА" and str(r.get("chat_id","")) == chat_id]
         matched = None
 
-        # Способ 1: по msg_id
         matched = next((r for r in open_rows if str(r.get("msg_id","")) == reply_mid), None)
-        if matched:
-            log.info(f"Matched by msg_id: #{matched['id']}")
+        if matched: log.info(f"Matched by msg_id: #{matched['id']}")
 
-        # Способ 2: по тексту цитируемого сообщения
         if not matched and reply_txt:
             short = reply_txt.lower()[:20]
             matched = next((r for r in open_rows if short and short in (r.get("question","")).lower()), None)
-            if matched:
-                log.info(f"Matched by reply_text: #{matched['id']}")
+            if matched: log.info(f"Matched by reply_text: #{matched['id']}")
 
-        # Способ 3: единственный открытый вопрос в чате
         if not matched and len(open_rows) == 1:
             matched = open_rows[0]
             log.info(f"Matched as single open: #{matched['id']}")
@@ -199,25 +281,23 @@ async def handle_message(msg: Message):
                 update_row_by_id(matched["id"], {
                     "answer": text, "status": "ЗАКРЫТА", "resolved_date": today_str()
                 })
+                sync_to_board({**matched, "answer": text, "status": "ЗАКРЫТА", "resolved_date": today_str()})
                 await notify_pm(
                     f"✅ Вопрос #{matched['id']} закрыт через reply\n"
                     f"💬 {verdict.get('summary') or text[:80]}\n"
                     f"Ответил: {asked_by}"
                 )
                 return
-            # Reply но не ответ — не создаём новый вопрос
             if not text.endswith("?") and not re.search(r"\bвопрос\b", text, re.I):
                 log.info("Reply not an answer and not a question — skipping")
                 return
 
-    # Определяем reply_to для нового вопроса
     reply_to_user, reply_to_name = "", ""
     if msg.reply_to_message and msg.reply_to_message.from_user:
         rf = msg.reply_to_message.from_user
         reply_to_user = f"@{rf.username}" if rf.username else ""
         reply_to_name = " ".join(filter(None,[rf.first_name, rf.last_name])).strip()
 
-    # Claude анализирует
     ai = ai_analyze(text, asked_by, reply_to_user or reply_to_name)
 
     if ai.get("is_question"):
@@ -249,7 +329,7 @@ async def create_question(msg, text, ai, chat_id, asked_by, reply_to_user, reply
     qid  = int(datetime.now().timestamp() * 1000)
     crit = ai.get("criticality","YELLOW")
 
-    append_row({
+    qrow = {
         "id": qid, "release": ai.get("release",""), "block": ai.get("block","Другое"),
         "question": question_text, "answer": "", "criticality": crit,
         "impact": ai.get("impact",""), "created_date": today_str(), "resolved_date": "",
@@ -257,8 +337,10 @@ async def create_question(msg, text, ai, chat_id, asked_by, reply_to_user, reply
         "responsible_name": responsible_name, "asked_by": asked_by,
         "chat_id": chat_id, "chat_name": msg.chat.title or "Private",
         "msg_id": str(msg.message_id)
-    })
+    }
+    append_row(qrow)
     log.info(f"New question #{qid}: {question_text[:50]}")
+    sync_to_board(qrow)
 
     resp_display = responsible or responsible_name or f"⚠️ /resp {qid} @username"
     await notify_pm(
@@ -287,7 +369,8 @@ async def detect_answer(msg, text, chat_id, asked_by):
     verdict = ai_verify(matched.get("question",""), text)
     if verdict.get("isAnswer") and verdict.get("confidence",0) >= 0.75:
         update_row_by_id(matched["id"], {"answer":text,"status":"ЗАКРЫТА","resolved_date":today_str()})
-        await notify_pm(f"✅ #{matched['id']} закрыт автоматически\n💬 {verdict.get('summary') or text[:80]}\nОтветил: {asked_by}")
+        sync_to_board({**matched, "answer": text, "status": "ЗАКРЫТА", "resolved_date": today_str()})
+        await notify_pm(f"✅ #{matched['id']} закрыт\n💬 {verdict.get('summary') or text[:80]}\nОтветил: {asked_by}")
 
 
 async def handle_command(msg, text, chat_id, asked_by):
@@ -295,6 +378,10 @@ async def handle_command(msg, text, chat_id, asked_by):
     if m:
         qid, ans = m.group(1), m.group(2) or "Закрыт"
         ok = update_row_by_id(int(qid), {"status":"ЗАКРЫТА","answer":ans,"resolved_date":today_str()})
+        if ok:
+            row = find_row_by_id(qid)
+            if row:
+                sync_to_board({**row, "answer": ans, "status": "ЗАКРЫТА", "resolved_date": today_str()})
         await msg.reply(f"✅ #{qid} закрыт" if ok else f"❌ #{qid} не найден")
         return
 
@@ -325,7 +412,7 @@ async def handle_command(msg, text, chat_id, asked_by):
         qid, val = m.group(1), m.group(2).strip()
         resp = val if val.startswith("@") else ""
         ok = update_row_by_id(int(qid), {"responsible":resp,"responsible_name":val})
-        warn = "\n⚠️ Нет @username — тег в напоминаниях недоступен" if not resp else ""
+        warn = "\n⚠️ Нет @username — тег недоступен" if not resp else ""
         await msg.reply(f"👤 #{qid}: {val}{warn}" if ok else f"❌ #{qid} не найден")
         return
 
@@ -345,7 +432,6 @@ async def handle_command(msg, text, chat_id, asked_by):
         await msg.reply("\n".join(lines))
         return
 
-# ── Планировщик ───────────────────────────────────────────────────
 async def daily_reminder():
     log.info("Daily reminder triggered")
     rows = get_all_rows()
@@ -399,14 +485,13 @@ async def weekly_report():
             text += f"{i+1}. #{r['id']} {r.get('question','')[:50]}\n   👤 {r.get('responsible') or 'нет ответственного'}\n"
     await notify_pm(text)
 
-# ── Запуск ────────────────────────────────────────────────────────
 async def main():
     scheduler = AsyncIOScheduler(timezone="Asia/Tashkent")
     scheduler.add_job(daily_reminder, CronTrigger(day_of_week="mon-fri", hour=10, minute=0))
     scheduler.add_job(weekly_report,  CronTrigger(day_of_week="mon",     hour=9,  minute=0))
     scheduler.start()
-    log.info("✅ NBU Bot v3 запущен")
-    await notify_pm("🤖 Бот запущен и слушает чаты в тихом режиме")
+    log.info("✅ NBU Bot v4 запущен")
+    await notify_pm("🤖 Бот v4 запущен — синхронизация с борд включена")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
