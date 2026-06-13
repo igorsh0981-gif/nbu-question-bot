@@ -197,7 +197,7 @@ def sync_to_board(question_data: dict):
 
         headers = ws_board.row_values(1)
         fields  = ["question","answer","criticality","impact","release",
-          "block","status","created_date","resolved_date","chat_name"]
+                   "block","status","created_date","resolved_date","chat_name"]
 
         if matched_idx:
             for col_name in fields:
@@ -461,6 +461,29 @@ async def handle_command(msg, text, chat_id, asked_by):
         await msg.reply(f"👤 #{qid}: {val}{warn}" if ok else f"❌ #{qid} не найден")
         return
 
+    if text.strip() in ["/help", "/menu", "/start"]:
+        await msg.reply(
+            "🤖 *NBU Question Bot — справка*\n\n"
+            "*Автотриггеры (бот читает чат сам):*\n"
+            "• Любое сообщение с `?` в конце\n"
+            "• Сообщение начинающееся с `вопрос:` или `Вопрос`\n"
+            "• Сообщение содержащее слово `вопрос`\n"
+            "• Reply на сообщение со словами: готово, ответ, закрыт, сделано, ок\n\n"
+            "*Команды:*\n"
+            "`/q текст` — создать вопрос вручную\n"
+            "`/close ID текст` — закрыть вопрос с ответом\n"
+            "`/answer ID текст` — записать ответ (не закрывает)\n"
+            "`/status ID` — статус вопроса\n"
+            "`/resp ID @username` — назначить ответственного\n"
+            "`/report` — список открытых вопросов в этом чате\n"
+            "`/help` — эта справка\n\n"
+            "*Автозакрытие:*\n"
+            "Сделай Reply на вопрос и напиши: `готово`, `ответ`, `закрыт`, `сделано`, `ок`, `предоставили`\n\n"
+            "*PM уведомления:*\n"
+            "Все события приходят в личку @IgorSh_Uz"
+        )
+        return
+
     if text.strip() == "/report":
         rows = get_all_rows()
         open_rows = [r for r in rows if r.get("status") == "ОТКРЫТА"]
@@ -536,8 +559,8 @@ async def main():
     scheduler.add_job(daily_reminder, CronTrigger(day_of_week="mon-fri", hour=10, minute=0))
     scheduler.add_job(weekly_report,  CronTrigger(day_of_week="mon",     hour=9,  minute=0))
     scheduler.start()
-    log.info("✅ NBU Bot v5 запущен")
-    await notify_pm("🤖 Бот v5 — фиксы дедупликации и синхронизации борда")
+    log.info("✅ NBU Bot v5.2 запущен")
+    await notify_pm("🤖 Бот v5.2 — добавлен /help и /menu")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
