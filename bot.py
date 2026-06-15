@@ -324,9 +324,8 @@ async def handle_message(msg: Message):
             matched = next((r for r in open_rows if short and short in (r.get("question","")).lower()), None)
             if matched: log.info(f"Matched by reply_text: #{matched['id']}")
 
-        if not matched and len(open_rows) == 1:
-            matched = open_rows[0]
-            log.info(f"Matched as single open: #{matched['id']}")
+        # Способ 3 (единственный открытый) — ОТКЛЮЧЁН: слишком много ложных срабатываний
+        # Закрытие только через msg_id, текст reply или явную команду /close
 
         if matched:
             # Если reply сам является вопросом — создаём новый, не закрываем
@@ -336,8 +335,10 @@ async def handle_message(msg: Message):
                 text.lower().startswith("вопрос")
             )
             if is_new_question:
-                log.info("Reply is a new question — skipping close, will create")
-            else:
+                log.info("Reply is a new question — will create new, not close")
+                # Не возвращаемся — даём коду дойти до ai_analyze и create_question
+                matched = None  # сбрасываем match чтобы не закрывать
+            if matched:  # только если не сбросили выше
                 verdict = ai_verify(matched.get("question",""), text)
                 log.info(f"Verdict: isAnswer={verdict.get('isAnswer')} confidence={verdict.get('confidence')}")
                 if verdict.get("isAnswer") and verdict.get("confidence",0) >= 0.4:
@@ -448,10 +449,7 @@ async def detect_answer(msg, text, chat_id, asked_by):
     matched = None
     if id_match:
         matched = next((r for r in rows if str(r.get("id","")) == id_match.group(1)), None)
-    if not matched:
-        open_in_chat = [r for r in rows if r.get("status") == "ОТКРЫТА" and str(r.get("chat_id","")) == chat_id]
-        if len(open_in_chat) == 1:
-            matched = open_in_chat[0]
+    # "Единственный открытый" — отключён как ненадёжный
     if not matched:
         return
     verdict = ai_verify(matched.get("question",""), text)
@@ -640,8 +638,8 @@ async def main():
     scheduler.add_job(daily_reminder, CronTrigger(day_of_week="mon-fri", hour=5, minute=0))
     scheduler.add_job(weekly_report,  CronTrigger(day_of_week="mon",     hour=9,  minute=0))
     scheduler.start()
-    log.info("✅ NBU Bot v5.7 запущен")
-    await notify_pm("🤖 Бот v5.7 — напоминание через 2 р.д., время 10:00 Ташкент")
+    log.info("✅ NBU Bot v5.9 запущен")
+    await notify_pm("🤖 Бот v5.9 — убран ненадёжный матч по единственному открытому вопросу")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
