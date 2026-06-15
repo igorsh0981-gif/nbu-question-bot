@@ -380,7 +380,12 @@ async def handle_message(msg: Message):
         r"^готово\.",
     ]
     text_lower = text.lower().strip()
-    is_stop = any(re.search(p, text_lower) for p in stop_patterns)
+    # Стоп-паттерны не применяем если сообщение содержит явный вопрос
+    has_question_signal = (
+        "?" in text or
+        bool(re.search(r"\bвопрос\b", text, re.I))
+    )
+    is_stop = not has_question_signal and any(re.search(p, text_lower) for p in stop_patterns)
 
     if is_stop:
         log.info(f"Stop pattern matched — skipping AI analysis")
@@ -638,8 +643,8 @@ async def main():
     scheduler.add_job(daily_reminder, CronTrigger(day_of_week="mon-fri", hour=5, minute=0))
     scheduler.add_job(weekly_report,  CronTrigger(day_of_week="mon",     hour=9,  minute=0))
     scheduler.start()
-    log.info("✅ NBU Bot v5.9 запущен")
-    await notify_pm("🤖 Бот v5.9 — убран ненадёжный матч по единственному открытому вопросу")
+    log.info("✅ NBU Bot v5.10 запущен")
+    await notify_pm("🤖 Бот v5.10 — стоп-паттерны не блокируют сообщения с вопросом")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
