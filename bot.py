@@ -196,8 +196,9 @@ def sync_to_board(question_data: dict):
                 return
 
         headers = ws_board.row_values(1)
-        fields  = ["question","answer","criticality","impact","release",
-                   "block","status","created_date","resolved_date","chat_name"]
+        fields  = ["release","block","question","answer","criticality","impact",
+                   "created_date","resolved_date","status","source","responsible",
+                   "responsible_name","asked_by","chat_id","chat_name","msg_id"]
 
         if matched_idx:
             for col_name in fields:
@@ -599,8 +600,8 @@ async def main():
     scheduler.add_job(daily_reminder, CronTrigger(day_of_week="mon-fri", hour=10, minute=0))
     scheduler.add_job(weekly_report,  CronTrigger(day_of_week="mon",     hour=9,  minute=0))
     scheduler.start()
-    log.info("✅ NBU Bot v5.4 запущен")
-    await notify_pm("🤖 Бот v5.4 — стоп-паттерны + улучшен промпт классификации")
+    log.info("✅ NBU Bot v5.5 запущен")
+    await notify_pm("🤖 Бот v5.5 — полный состав данных в борд")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
