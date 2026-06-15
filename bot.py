@@ -35,6 +35,9 @@ bot       = Bot(token=TELEGRAM_TOKEN)
 dp        = Dispatcher()
 ai_client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
+# Хранилище: chat_id → message_id последнего дайджеста
+last_reminder_msg: dict = {}
+
 def make_gspread():
     d = json.loads(GOOGLE_TOKEN_JSON)
     c = Credentials(
@@ -517,12 +520,27 @@ async def handle_command(msg, text, chat_id, asked_by):
             "`/status ID` — статус вопроса\n"
             "`/resp ID @username` — назначить ответственного\n"
             "`/report` — список открытых вопросов в этом чате\n"
+            "`/recall` — удалить последний дайджест из чата\n"
             "`/help` — эта справка\n\n"
             "*Автозакрытие:*\n"
             "Сделай Reply на вопрос и напиши: `готово`, `ответ`, `закрыт`, `сделано`, `ок`, `предоставили`\n\n"
             "*PM уведомления:*\n"
             "Все события приходят в личку @IgorSh_Uz"
         )
+        return
+
+    if text.strip() == "/recall":
+        reminder_id = last_reminder_msg.get(chat_id)
+        if reminder_id:
+            try:
+                await bot.delete_message(int(chat_id), reminder_id)
+                last_reminder_msg.pop(chat_id, None)
+                log.info(f"Reminder recalled in {chat_id}")
+            except Exception as e:
+                log.error(f"Recall error: {e}")
+                await msg.reply("❌ Не удалось удалить сообщение — возможно оно уже удалено или прошло >48 часов")
+        else:
+            await msg.reply("ℹ️ Нет сохранённого дайджеста для удаления в этом чате")
         return
 
     if text.strip() == "/report":
@@ -547,6 +565,26 @@ async def daily_reminder():
     rows = get_all_rows()
     open_rows = [r for r in rows if r.get("status") == "ОТКРЫТА"]
     if not open_rows: return
+
+    # Только вопросы у которых уже прошло 2+ рабочих дня с создания
+    def reminder_due(created_date_str: str) -> bool:
+        """Возвращает True если сегодня >= дата напоминания (создание + 2 рабочих дня)."""
+        try:
+            d = datetime.strptime(created_date_str, "%d.%m.%y")
+        except:
+            return False
+        added = 0
+        temp = d
+        while added < 2:
+            temp += timedelta(days=1)
+            if temp.weekday() < 5:
+                added += 1
+        return datetime.now().date() >= temp.date()
+
+    open_rows = [r for r in open_rows if reminder_due(r.get("created_date",""))]
+    if not open_rows:
+        log.info("No questions due for reminder today — skip")
+        return
     by_chat = {}
     for r in open_rows:
         cid = str(r.get("chat_id",""))
@@ -566,10 +604,12 @@ async def daily_reminder():
         lines = [f"🔔 Открытые вопросы\n{tag_line}\n"]
         for i,r in enumerate(sorted_rows[:15]):
             resp = r.get("responsible") or r.get("responsible_name") or "❓"
-            lines.append(f"{i+1}. {crit_emoji(r.get('criticality',''))} {r.get('question','')[:60]}\n   → {resp}")
+            lines.append(f"{i+1}. {crit_emoji(r.get('criticality',''))} {r.get('question','')}\n   → {resp}")
         lines.append(f"\n🔴 Критичных: {red_count} из {len(sorted_rows)}")
         try:
-            await bot.send_message(int(chat_id), "\n".join(lines))
+            sent = await bot.send_message(int(chat_id), "\n".join(lines))
+            last_reminder_msg[chat_id] = sent.message_id
+            log.info(f"Reminder sent to {chat_id}, msg_id={sent.message_id}")
         except Exception as e:
             log.error(f"Reminder error: {e}")
 
@@ -597,11 +637,11 @@ async def weekly_report():
 
 async def main():
     scheduler = AsyncIOScheduler(timezone="Asia/Tashkent")
-    scheduler.add_job(daily_reminder, CronTrigger(day_of_week="mon-fri", hour=10, minute=0))
+    scheduler.add_job(daily_reminder, CronTrigger(day_of_week="mon-fri", hour=5, minute=0))
     scheduler.add_job(weekly_report,  CronTrigger(day_of_week="mon",     hour=9,  minute=0))
     scheduler.start()
-    log.info("✅ NBU Bot v5.5 запущен")
-    await notify_pm("🤖 Бот v5.5 — полный состав данных в борд")
+    log.info("✅ NBU Bot v5.7 запущен")
+    await notify_pm("🤖 Бот v5.7 — напоминание через 2 р.д., время 10:00 Ташкент")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
