@@ -232,7 +232,7 @@ def ai_analyze(text: str, asked_by: str, reply_to: str = "") -> dict:
         + (f"Reply на: {reply_to}\n" if reply_to else "") +
         "\nЯвляется ли это вопросом требующим ответа и отслеживания?\n"
         "Вопрос: прямой вопрос, запрос информации/статуса/доступа, проблема требующая решения.\n"
-        "НЕ вопрос: приветствия, благодарности, утверждения, ответы на чужие вопросы.\n\n"
+        "НЕ вопрос:\n""- Приветствия (Добрый день, Здравствуйте)\n""- Благодарности и подтверждения\n""- Утверждения и информирование без запроса\n""- Ответы по существу (По данному вопросу..., Считаем что..., На наш взгляд...)\n""- Просьбы провести тестирование или проверку\n""- Сообщения о внесённых изменениях или исправлениях\n\n"
         'Верни ТОЛЬКО JSON без markdown:\n'
         '{"is_question":true/false,"responsible":"@username если явно указан иначе null",'
         '"block":"Авторизация|Платежи|Интеграция|Документы|Доступы|Тестирование|Дизайн|Другое",'
@@ -355,6 +355,32 @@ async def handle_message(msg: Message):
         rf = msg.reply_to_message.from_user
         reply_to_user = f"@{rf.username}" if rf.username else ""
         reply_to_name = " ".join(filter(None,[rf.first_name, rf.last_name])).strip()
+
+    # Стоп-паттерны — сообщения которые точно не являются вопросами
+    stop_patterns = [
+        r"^добрый\s+(день|утро|вечер)",
+        r"^по данному вопросу",
+        r"^считаем[,\s]",
+        r"^на наш взгляд",
+        r"^просим вас",
+        r"^уведомляем",
+        r"^информируем",
+        r"^сообщаем",
+        r"^в ответ на",
+        r"^в связи с",
+        r"^подтверждаем",
+        r"^принято к",
+        r"^выполнено\.",
+        r"^исправлено\.",
+        r"^готово\.",
+    ]
+    text_lower = text.lower().strip()
+    is_stop = any(re.search(p, text_lower) for p in stop_patterns)
+
+    if is_stop:
+        log.info(f"Stop pattern matched — skipping AI analysis")
+        await detect_answer(msg, text, chat_id, asked_by)
+        return
 
     ai = ai_analyze(text, asked_by, reply_to_user or reply_to_name)
 
@@ -573,8 +599,8 @@ async def main():
     scheduler.add_job(daily_reminder, CronTrigger(day_of_week="mon-fri", hour=10, minute=0))
     scheduler.add_job(weekly_report,  CronTrigger(day_of_week="mon",     hour=9,  minute=0))
     scheduler.start()
-    log.info("✅ NBU Bot v5.3 запущен")
-    await notify_pm("🤖 Бот v5.3 — фиксы: reply-вопрос не закрывает, ок как отдельное слово")
+    log.info("✅ NBU Bot v5.4 запущен")
+    await notify_pm("🤖 Бот v5.4 — стоп-паттерны + улучшен промпт классификации")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
