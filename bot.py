@@ -251,14 +251,20 @@ def ai_analyze(text: str, asked_by: str, reply_to: str = "") -> dict:
         return {"is_question": False}
 
 def ai_verify(question: str, answer: str) -> dict:
-    close_kw = ["закрыт","закрываем","закрыто","готово","сделано","выполнено",
-                "ответ дан","ответ предоставлен","ответ","предоставлен","предоставили",
-                "ok","ок","принято","согласовано","исправлено","решено","дан",
-                "выполнили","сделали","смотри","см.","направили","отправили"]
+    # Слова которые проверяем как ПОДСТРОКУ (достаточно встретить где угодно)
+    close_kw_substr = ["закрыт","закрываем","закрыто","готово","сделано","выполнено",
+                       "ответ дан","ответ предоставлен","предоставлен","предоставили",
+                       "принято","согласовано","исправлено","решено","направили","отправили"]
+    # Слова которые проверяем ТОЛЬКО как отдельное слово (\b границы)
+    close_kw_word = ["ответ","ok","ок","дан","сделали","выполнили","смотри","см"]
     al = answer.lower().strip()
-    for kw in close_kw:
+    for kw in close_kw_substr:
         if kw in al:
-            log.info(f"Keyword closing: {kw}")
+            log.info(f"Keyword closing (substr): {kw}")
+            return {"isAnswer": True, "confidence": 0.9, "summary": answer[:80]}
+    for kw in close_kw_word:
+        if re.search(r"\b" + re.escape(kw) + r"\b", al):
+            log.info(f"Keyword closing (word): {kw}")
             return {"isAnswer": True, "confidence": 0.9, "summary": answer[:80]}
     try:
         prompt = (
@@ -319,22 +325,30 @@ async def handle_message(msg: Message):
             log.info(f"Matched as single open: #{matched['id']}")
 
         if matched:
-            verdict = ai_verify(matched.get("question",""), text)
-            log.info(f"Verdict: isAnswer={verdict.get('isAnswer')} confidence={verdict.get('confidence')}")
-            if verdict.get("isAnswer") and verdict.get("confidence",0) >= 0.4:
-                updates = {"answer": text, "status": "ЗАКРЫТА", "resolved_date": today_str()}
-                update_row_by_id(matched["id"], updates)
-                # БАГ 1 FIX: синхронизируем закрытие в борд
-                sync_to_board({**matched, **updates})
-                await notify_pm(
-                    f"✅ Вопрос #{matched['id']} закрыт через reply\n"
-                    f"💬 {verdict.get('summary') or text[:80]}\n"
-                    f"Ответил: {asked_by}"
-                )
-                return
-            if not text.endswith("?") and not re.search(r"\bвопрос\b", text, re.I):
-                log.info("Reply not answer, not question — skipping")
-                return
+            # Если reply сам является вопросом — создаём новый, не закрываем
+            is_new_question = (
+                text.endswith("?") or
+                bool(re.search(r"\bвопрос\b", text, re.I)) or
+                text.lower().startswith("вопрос")
+            )
+            if is_new_question:
+                log.info("Reply is a new question — skipping close, will create")
+            else:
+                verdict = ai_verify(matched.get("question",""), text)
+                log.info(f"Verdict: isAnswer={verdict.get('isAnswer')} confidence={verdict.get('confidence')}")
+                if verdict.get("isAnswer") and verdict.get("confidence",0) >= 0.4:
+                    updates = {"answer": text, "status": "ЗАКРЫТА", "resolved_date": today_str()}
+                    update_row_by_id(matched["id"], updates)
+                    sync_to_board({**matched, **updates})
+                    await notify_pm(
+                        f"✅ Вопрос #{matched['id']} закрыт через reply\n"
+                        f"💬 {verdict.get('summary') or text[:80]}\n"
+                        f"Ответил: {asked_by}"
+                    )
+                    return
+                if not text.endswith("?") and not re.search(r"\bвопрос\b", text, re.I):
+                    log.info("Reply not answer, not question — skipping")
+                    return
 
     reply_to_user, reply_to_name = "", ""
     if msg.reply_to_message and msg.reply_to_message.from_user:
@@ -559,8 +573,8 @@ async def main():
     scheduler.add_job(daily_reminder, CronTrigger(day_of_week="mon-fri", hour=10, minute=0))
     scheduler.add_job(weekly_report,  CronTrigger(day_of_week="mon",     hour=9,  minute=0))
     scheduler.start()
-    log.info("✅ NBU Bot v5.2 запущен")
-    await notify_pm("🤖 Бот v5.2 — добавлен /help и /menu")
+    log.info("✅ NBU Bot v5.3 запущен")
+    await notify_pm("🤖 Бот v5.3 — фиксы: reply-вопрос не закрывает, ок как отдельное слово")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
