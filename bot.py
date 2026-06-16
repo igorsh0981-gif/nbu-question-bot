@@ -535,6 +535,7 @@ async def handle_command(msg, text, chat_id, asked_by):
         return
 
     if text.strip() in ["/help", "/menu", "/start"]:
+        log.info(f"START/HELP from {asked_by} chat_id={chat_id}")
         await msg.reply(
             "🤖 *NBU Question Bot — справка*\n\n"
             "*Автотриггеры (бот читает чат сам):*\n"
