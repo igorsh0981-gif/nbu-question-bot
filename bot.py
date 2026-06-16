@@ -7,7 +7,7 @@ import logging
 import json
 import re
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from aiogram import Bot, Dispatcher, F
@@ -180,7 +180,16 @@ def sync_to_board(question_data: dict):
     - Не найден                   → создать новую
     """
     try:
-        board_rows = ws_board.get_all_records()
+        # get_all_records падает при дублирующихся заголовках — используем get_all_values
+        all_values = ws_board.get_all_values()
+        if not all_values:
+            board_rows = []
+        else:
+            headers = all_values[0]
+            board_rows = []
+            for row in all_values[1:]:
+                if any(v.strip() for v in row):  # пропускаем пустые строки
+                    board_rows.append(dict(zip(headers, row + [''] * (len(headers) - len(row)))))
         q_text = question_data.get("question", "")
         incoming_status = question_data.get("status", "ОТКРЫТА")
 
@@ -198,7 +207,8 @@ def sync_to_board(question_data: dict):
                 log.info("Both ЗАКРЫТА → skip")
                 return
 
-        headers = ws_board.row_values(1)
+        all_vals = ws_board.get_all_values()
+        headers = all_vals[0] if all_vals else ws_board.row_values(1)
         fields  = ["release","block","question","answer","criticality","impact",
                    "created_date","resolved_date","status","source","responsible",
                    "responsible_name","asked_by","chat_id","chat_name","msg_id"]
@@ -643,7 +653,7 @@ async def main():
     scheduler.add_job(daily_reminder, CronTrigger(day_of_week="mon-fri", hour=5, minute=0))
     scheduler.add_job(weekly_report,  CronTrigger(day_of_week="mon",     hour=9,  minute=0))
     scheduler.start()
-    log.info("✅ NBU Bot v5.10 запущен")
+    log.info("✅ NBU Bot v5.11 запущен")
     await notify_pm("🤖 Бот v5.10 — стоп-паттерны не блокируют сообщения с вопросом")
     await dp.start_polling(bot)
 
