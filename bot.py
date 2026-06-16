@@ -372,7 +372,6 @@ async def handle_message(msg: Message):
             # Если reply сам является вопросом — создаём новый, не закрываем
             is_new_question = (
                 text.endswith("?") or
-                bool(re.search(r"\bвопрос\b", text, re.I)) or
                 text.lower().startswith("вопрос")
             )
             if is_new_question:
