@@ -26,7 +26,9 @@ TELEGRAM_TOKEN    = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_KEY     = os.environ["ANTHROPIC_API_KEY"]
 SHEET_ID          = os.environ["SHEET_ID"]
 SHEET_NAME        = "Questions"
+SHEET_NAME_IBANK  = "Questions_IbankMP"
 GROUP_CHAT_ID     = int(os.environ.get("GROUP_CHAT_ID", "-1003963999739"))
+IBANK_MP_CHAT_ID  = int(os.environ.get("IBANK_MP_CHAT_ID", "-1003934512366"))
 PM_CHAT_ID        = int(os.environ.get("PM_CHAT_ID", "5281759957"))
 GOOGLE_TOKEN_JSON = os.environ["GOOGLE_TOKEN_JSON"]
 BOARD_SHEET_ID    = os.environ.get("BOARD_SHEET_ID", "1zXNvio8ti1tpU4HkuROE9tzzPSQzLBCy_0gxvb7CYR0")
@@ -49,40 +51,54 @@ def make_gspread():
         c.refresh(Request())
     return gspread.authorize(c)
 
-gc       = make_gspread()
-sh       = gc.open_by_key(SHEET_ID)
-ws       = sh.worksheet(SHEET_NAME)
-sh_board = gc.open_by_key(BOARD_SHEET_ID)
-ws_board = sh_board.worksheet("questions_bank")
+gc          = make_gspread()
+sh          = gc.open_by_key(SHEET_ID)
+ws          = sh.worksheet(SHEET_NAME)
+ws_ibank    = sh.worksheet(SHEET_NAME_IBANK)
+sh_board    = gc.open_by_key(BOARD_SHEET_ID)
+ws_board    = sh_board.worksheet("questions_bank")
+
+def get_ws(chat_id: str):
+    """Возвращает нужный worksheet в зависимости от chat_id группы."""
+    return ws_ibank if str(chat_id) == str(IBANK_MP_CHAT_ID) else ws
 
 # ── Google Sheets хелперы ─────────────────────────────────────────
-def get_all_rows() -> list:
-    return ws.get_all_records()
+def get_all_rows(chat_id: str = None) -> list:
+    sheet = get_ws(chat_id) if chat_id else ws
+    return sheet.get_all_records()
 
-def append_row(data: dict):
-    headers = ws.row_values(1)
+def get_all_rows_both() -> list:
+    """Читает из обоих листов — для команд /status, /report и т.п."""
+    rows = ws.get_all_records() + ws_ibank.get_all_records()
+    return rows
+
+def append_row(data: dict, chat_id: str = None):
+    sheet = get_ws(chat_id) if chat_id else ws
+    headers = sheet.row_values(1)
     row = [str(data.get(h, "")) for h in headers]
-    ws.append_row(row, value_input_option="USER_ENTERED")
+    sheet.append_row(row, value_input_option="USER_ENTERED")
 
-def update_row_by_id(question_id, updates: dict) -> bool:
+def update_row_by_id(question_id, updates: dict, chat_id: str = None) -> bool:
     try:
-        records = ws.get_all_records()
-        headers = ws.row_values(1)
-        for i, r in enumerate(records):
-            if str(r.get("id", "")) == str(question_id):
-                row_num = i + 2
-                for col_name, value in updates.items():
-                    if col_name in headers:
-                        col_idx = headers.index(col_name) + 1
-                        ws.update_cell(row_num, col_idx, str(value))
-                return True
+        sheets_to_try = [get_ws(chat_id)] if chat_id else [ws, ws_ibank]
+        for sheet in sheets_to_try:
+            records = sheet.get_all_records()
+            headers = sheet.row_values(1)
+            for i, r in enumerate(records):
+                if str(r.get("id", "")) == str(question_id):
+                    row_num = i + 2
+                    for col_name, value in updates.items():
+                        if col_name in headers:
+                            col_idx = headers.index(col_name) + 1
+                            sheet.update_cell(row_num, col_idx, str(value))
+                    return True
         return False
     except Exception as e:
         log.error(f"update_row_by_id error: {e}")
         return False
 
 def find_row_by_id(question_id) -> Optional[dict]:
-    return next((r for r in get_all_rows() if str(r.get("id","")) == str(question_id)), None)
+    return next((r for r in get_all_rows_both() if str(r.get("id","")) == str(question_id)), None)
 
 def today_str() -> str:
     now = datetime.now()
@@ -93,7 +109,7 @@ def crit_emoji(c: str) -> str:
 
 def check_duplicate(question_text: str) -> Optional[dict]:
     short_new = question_text.lower()[:25]
-    for r in get_all_rows():
+    for r in get_all_rows_both():
         if r.get("status") != "ОТКРЫТА":
             continue
         s = (r.get("question","")).lower()[:25]
@@ -322,7 +338,7 @@ async def handle_message(msg: Message):
         return
 
     if msg.reply_to_message:
-        rows = get_all_rows()
+        rows = get_all_rows(chat_id=chat_id)
         open_rows = [r for r in rows if r.get("status") == "ОТКРЫТА" and str(r.get("chat_id","")) == chat_id]
         matched = None
 
@@ -442,7 +458,7 @@ async def create_question(msg, text, ai, chat_id, asked_by, reply_to_user, reply
         "chat_id": chat_id, "chat_name": msg.chat.title or "Private",
         "msg_id": str(msg.message_id)
     }
-    append_row(qrow)
+    append_row(qrow, chat_id=chat_id)
     log.info(f"New question #{qid}: {question_text[:50]}")
     sync_to_board(qrow)
 
@@ -459,7 +475,7 @@ async def create_question(msg, text, ai, chat_id, asked_by, reply_to_user, reply
 
 
 async def detect_answer(msg, text, chat_id, asked_by):
-    rows = get_all_rows()
+    rows = get_all_rows_both()
     id_match = re.search(r"\b(\d{13,})\b", text)
     matched = None
     if id_match:
@@ -470,7 +486,7 @@ async def detect_answer(msg, text, chat_id, asked_by):
     verdict = ai_verify(matched.get("question",""), text)
     if verdict.get("isAnswer") and verdict.get("confidence",0) >= 0.75:
         updates = {"answer":text,"status":"ЗАКРЫТА","resolved_date":today_str()}
-        update_row_by_id(matched["id"], updates)
+        update_row_by_id(matched["id"], updates, chat_id=str(matched.get("chat_id","")))
         sync_to_board({**matched, **updates})
         await notify_pm(f"✅ #{matched['id']} закрыт\n💬 {verdict.get('summary') or text[:80]}\nОтветил: {asked_by}")
 
@@ -557,7 +573,7 @@ async def handle_command(msg, text, chat_id, asked_by):
         return
 
     if text.strip() == "/report":
-        rows = get_all_rows()
+        rows = get_all_rows_both()
         open_rows = [r for r in rows if r.get("status") == "ОТКРЫТА"]
         if not open_rows:
             await msg.reply("✅ Открытых вопросов нет!"); return
@@ -575,7 +591,7 @@ async def handle_command(msg, text, chat_id, asked_by):
 # ── Планировщик ───────────────────────────────────────────────────
 async def daily_reminder():
     log.info("Daily reminder triggered")
-    rows = get_all_rows()
+    rows = get_all_rows_both()
     open_rows = [r for r in rows if r.get("status") == "ОТКРЫТА"]
     if not open_rows: return
 
@@ -628,7 +644,7 @@ async def daily_reminder():
 
 async def weekly_report():
     log.info("Weekly report triggered")
-    rows = get_all_rows()
+    rows = get_all_rows_both()
     open_rows   = [r for r in rows if r.get("status")=="ОТКРЫТА"]
     closed_rows = [r for r in rows if r.get("status")=="ЗАКРЫТА"]
     red=[r for r in open_rows if r.get("criticality")=="RED"]
