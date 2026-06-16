@@ -263,7 +263,16 @@ def ai_analyze(text: str, asked_by: str, reply_to: str = "") -> dict:
         + (f"Reply на: {reply_to}\n" if reply_to else "") +
         "\nЯвляется ли это вопросом требующим ответа и отслеживания?\n"
         "Вопрос: прямой вопрос, запрос информации/статуса/доступа, проблема требующая решения.\n"
-        "НЕ вопрос:\n""- Приветствия (Добрый день, Здравствуйте)\n""- Благодарности и подтверждения\n""- Утверждения и информирование без запроса\n""- Ответы по существу (По данному вопросу..., Считаем что..., На наш взгляд...)\n""- Просьбы провести тестирование или проверку\n""- Сообщения о внесённых изменениях или исправлениях\n\n"
+        "НЕ вопрос:\n"
+        "- Приветствия (Добрый день, Здравствуйте)\n"
+        "- Благодарности и подтверждения\n"
+        "- Утверждения и информирование без запроса\n"
+        "- Ответы по существу (По данному вопросу..., Считаем что..., На наш взгляд...)\n"
+        "- Просьбы провести тестирование или проверку\n"
+        "- Сообщения о внесённых изменениях или исправлениях\n"
+        "- Короткие уточняющие фразы без вопросительного знака (например: 'Покупка валюты', 'RRN операции', 'Тариф МП')\n"
+        "- Продолжение/уточнение предыдущего ответа без нового запроса\n"
+        "- Технические логи, XML, JSON-дампы, трассировки ошибок\n\n"
         'Верни ТОЛЬКО JSON без markdown:\n'
         '{"is_question":true/false,"responsible":"@username если явно указан иначе null",'
         '"block":"Авторизация|Платежи|Интеграция|Документы|Доступы|Тестирование|Дизайн|Другое",'
@@ -392,6 +401,20 @@ async def handle_message(msg: Message):
         rf = msg.reply_to_message.from_user
         reply_to_user = f"@{rf.username}" if rf.username else ""
         reply_to_name = " ".join(filter(None,[rf.first_name, rf.last_name])).strip()
+
+    # Правило 1: минимальная длина — короткие фразы не вопросы
+    if len(text.strip()) < 30 and "?" not in text and not re.search(r"\bвопрос\b", text, re.I):
+        log.info(f"Too short ({len(text.strip())} chars) — skipping AI analysis")
+        await detect_answer(msg, text, chat_id, asked_by)
+        return
+
+    # Правило 2: технические дампы (XML, JSON, логи) — не вопросы
+    tech_dump_signals = ["<?xml", "<soap", "<ns", "soapenv", "INFO ", "ERROR ", "DEBUG ",
+                         "\"level\":", "\"thread\":", "loggerName", "PostTransaction"]
+    if any(sig in text for sig in tech_dump_signals):
+        log.info("Technical dump detected — skipping AI analysis")
+        await detect_answer(msg, text, chat_id, asked_by)
+        return
 
     # Стоп-паттерны — сообщения которые точно не являются вопросами
     stop_patterns = [
