@@ -30,6 +30,7 @@ SHEET_NAME_IBANK  = "Questions_IbankMP"
 GROUP_CHAT_ID     = int(os.environ.get("GROUP_CHAT_ID", "-1003963999739"))
 IBANK_MP_CHAT_ID  = int(os.environ.get("IBANK_MP_CHAT_ID", "-1003934512366"))
 PM_CHAT_ID        = int(os.environ.get("PM_CHAT_ID", "5281759957"))
+SHAKHBOZ_CHAT_ID  = int(os.environ.get("SHAKHBOZ_CHAT_ID", "8239348513"))
 GOOGLE_TOKEN_JSON = os.environ["GOOGLE_TOKEN_JSON"]
 BOARD_SHEET_ID    = os.environ.get("BOARD_SHEET_ID", "1zXNvio8ti1tpU4HkuROE9tzzPSQzLBCy_0gxvb7CYR0")
 
@@ -313,11 +314,16 @@ def ai_verify(question: str, answer: str) -> dict:
         log.error(f"Claude verify error: {e}")
         return {"isAnswer": False, "confidence": 0, "summary": ""}
 
-async def notify_pm(text: str):
+async def notify_pm(text: str, extra_chat_id: int = None):
     try:
         await bot.send_message(PM_CHAT_ID, text)
     except Exception as e:
         log.error(f"PM notify error: {e}")
+    if extra_chat_id:
+        try:
+            await bot.send_message(extra_chat_id, text)
+        except Exception as e:
+            log.error(f"Extra notify error ({extra_chat_id}): {e}")
 
 # ── Основной хендлер ─────────────────────────────────────────────
 @dp.message(F.text)
@@ -463,6 +469,7 @@ async def create_question(msg, text, ai, chat_id, asked_by, reply_to_user, reply
     sync_to_board(qrow)
 
     resp_display = responsible or responsible_name or f"⚠️ /resp {qid} @username"
+    extra = SHAKHBOZ_CHAT_ID if str(chat_id) == str(IBANK_MP_CHAT_ID) else None
     await notify_pm(
         f"📋 Новый вопрос #{qid}\n"
         f"{crit_emoji(crit)} {crit} | 📦 {ai.get('block','Другое')}\n"
@@ -470,7 +477,8 @@ async def create_question(msg, text, ai, chat_id, asked_by, reply_to_user, reply
         f"💬 {question_text[:100]}\n"
         f"Автор: {asked_by}\n\n"
         f"/resp {qid} @username\n"
-        f"/close {qid} <ответ>"
+        f"/close {qid} <ответ>",
+        extra_chat_id=extra
     )
 
 
