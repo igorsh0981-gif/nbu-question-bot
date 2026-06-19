@@ -486,9 +486,18 @@ async def create_question(msg, text, ai, chat_id, asked_by, reply_to_user, reply
         "chat_id": chat_id, "chat_name": msg.chat.title or "Private",
         "msg_id": str(msg.message_id)
     }
-    append_row(qrow, chat_id=chat_id)
-    log.info(f"New question #{qid}: {question_text[:50]}")
-    sync_to_board(qrow)
+    try:
+        append_row(qrow, chat_id=chat_id)
+        log.info(f"New question #{qid}: {question_text[:50]}")
+    except Exception as e:
+        log.error(f"append_row error: {e}")
+        await notify_error("append_row / Google Sheets", e)
+        return
+    try:
+        sync_to_board(qrow)
+    except Exception as e:
+        log.error(f"sync_to_board error: {e}")
+        await notify_error("sync_to_board", e)
 
     resp_display = responsible or responsible_name or f"⚠️ /resp {qid} @username"
     extra = SHAKHBOZ_CHAT_ID if str(chat_id) == str(IBANK_MP_CHAT_ID) else None
@@ -673,6 +682,30 @@ async def daily_reminder():
         except Exception as e:
             log.error(f"Reminder error: {e}")
 
+async def heartbeat():
+    """Раз в час проверяет что Google Sheets и Anthropic живы."""
+    errors = []
+    # Проверка Google Sheets
+    try:
+        ws.get_all_values()
+    except Exception as e:
+        errors.append(f"Google Sheets: {type(e).__name__}: {str(e)[:100]}")
+        log.error(f"Heartbeat — Sheets error: {e}")
+    # Проверка Anthropic
+    try:
+        ai_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=10,
+            messages=[{"role": "user", "content": "ping"}]
+        )
+    except Exception as e:
+        errors.append(f"Anthropic API: {type(e).__name__}: {str(e)[:100]}")
+        log.error(f"Heartbeat — Anthropic error: {e}")
+    if errors:
+        await notify_pm("🚨 *Heartbeat — обнаружены проблемы:*\n" + "\n".join(f"• {e}" for e in errors))
+    else:
+        log.info("Heartbeat OK")
+
 async def weekly_report():
     log.info("Weekly report triggered")
     rows = get_all_rows_both()
@@ -695,13 +728,35 @@ async def weekly_report():
             text += f"{i+1}. #{r['id']} {r.get('question','')[:50]}\n   👤 {r.get('responsible') or 'нет ответственного'}\n"
     await notify_pm(text)
 
+async def notify_error(context: str, error: Exception):
+    """Отправляет уведомление об ошибке PM."""
+    error_type = type(error).__name__
+    text = (
+        f"🚨 *Ошибка бота*\n"
+        f"📍 `{context}`\n"
+        f"❗ `{error_type}: {str(error)[:200]}`\n"
+        f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
+    )
+    try:
+        await bot.send_message(PM_CHAT_ID, text, parse_mode="Markdown")
+    except Exception as e:
+        log.error(f"Failed to send error notification: {e}")
+
 async def main():
+    # Глобальный error handler для aiogram
+    @dp.errors()
+    async def global_error_handler(event, exception):
+        log.error(f"Unhandled exception: {exception}")
+        await notify_error("aiogram handler", exception)
+        return True
+
     scheduler = AsyncIOScheduler(timezone="Asia/Tashkent")
     scheduler.add_job(daily_reminder, CronTrigger(day_of_week="mon-fri", hour=5, minute=0))
     scheduler.add_job(weekly_report,  CronTrigger(day_of_week="mon",     hour=9,  minute=0))
+    scheduler.add_job(heartbeat,      CronTrigger(hour="*/1", minute=0))
     scheduler.start()
-    log.info("✅ NBU Bot v5.11 запущен")
-    await notify_pm("🤖 Бот v5.10 — стоп-паттерны не блокируют сообщения с вопросом")
+    log.info("✅ NBU Bot v5.12 запущен")
+    await notify_pm("✅ NBU Bot v5.12 запущен — роутинг IbankMP, уведомления об ошибках")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
