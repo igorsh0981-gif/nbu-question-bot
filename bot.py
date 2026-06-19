@@ -343,6 +343,11 @@ async def handle_message(msg: Message):
     username  = f"@{from_user.username}" if from_user.username else None
     asked_by  = " ".join(filter(None,[username, from_user.first_name])).strip()
 
+    # Личка — только PM (Igor) и Shakhboz
+    if msg.chat.type == "private" and msg.from_user.id not in (PM_CHAT_ID, SHAKHBOZ_CHAT_ID):
+        log.info(f"Private message from unauthorized user {asked_by} ({msg.from_user.id}) — ignored")
+        return
+
     has_reply = bool(msg.reply_to_message)
     reply_mid = str(msg.reply_to_message.message_id) if has_reply else "none"
     reply_txt = (msg.reply_to_message.text or "")[:40] if has_reply else ""
