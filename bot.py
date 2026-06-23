@@ -195,7 +195,12 @@ def sync_to_board(question_data: dict):
     - Борд ЗАКРЫТА + бот ОТКРЫТА  → создать новую
     - Борд ЗАКРЫТА + бот ЗАКРЫТА  → игнорировать
     - Не найден                   → создать новую
+    - IbankMP группа              → не записывать в борд
     """
+    # Вопросы из IbankMP не идут в борд
+    if str(question_data.get("chat_id", "")) == str(IBANK_MP_CHAT_ID):
+        log.info("IbankMP question — skipping board sync")
+        return
     try:
         # get_all_records падает при дублирующихся заголовках — используем get_all_values
         all_values = ws_board.get_all_values()
